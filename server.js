@@ -9,28 +9,28 @@ import crypto from 'crypto';
 import process from 'process';
 import { fileURLToPath } from 'url';
 
-// --- __dirname для ESM
+// __dirname for ESM
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
-// === CONFIG / ENV ===
+// ===== ENV / CONFIG =====
 const PORT               = Number(process.env.PORT || 3000);
 const TASK_KEY           = process.env.TASK_KEY || 'dev-task-key';
 const LOG_DIR            = process.env.LOG_DIR  || '/mnt/data/logs';
 const TASK_DIR           = process.env.TASK_DIR || '/mnt/data/tasks';
 const DEFAULT_REPLY      = process.env.DEFAULT_REPLY || 'Здравствуйте!';
 const ONLY_FIRST_SYSTEM  = String(process.env.ONLY_FIRST_SYSTEM || 'true').toLowerCase() === 'true';
-const WEBHOOK_SECRET     = process.env.WEBHOOK_SECRET || ''; // пусто = без проверки секрета
+const WEBHOOK_SECRET     = process.env.WEBHOOK_SECRET || ''; // пусто = без строгой проверки секрета
 
-// сколько последних файлов логов читать и сколько байт хвоста
+// Сколько лог-файлов и сколько байт «хвоста» читать при проверке
 const LOG_SCAN_FILES     = Math.max(1, Number(process.env.LOG_SCAN_FILES || 2));
-const LOG_TAIL_BYTES     = Math.max(64*1024, Number(process.env.LOG_TAIL_BYTES || 512*1024)); // >=64КБ
+const LOG_TAIL_BYTES     = Math.max(64 * 1024, Number(process.env.LOG_TAIL_BYTES || 512 * 1024));
 
-// надёжность локов
+// Живучесть локов
 const VISIBILITY_TIMEOUT_MS = Number(process.env.VISIBILITY_TIMEOUT_MS || 180000); // 3 мин
 const HEARTBEAT_GRACE_MS    = Number(process.env.HEARTBEAT_GRACE_MS    || 60000);  // 1 мин
 
-// === helpers ===
+// ===== helpers =====
 async function ensureDir(dir) { try { await fsp.mkdir(dir, { recursive: true }); } catch {} }
 function nowIso() { return new Date().toISOString(); }
 function genId() { return crypto.randomBytes(16).toString('hex'); }
@@ -38,7 +38,7 @@ function genId() { return crypto.randomBytes(16).toString('hex'); }
 function todayLogName() {
   const d = new Date();
   const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth()+1).padStart(2, '0');
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
   const dd = String(d.getUTCDate()).padStart(2, '0');
   return `logs.${y}${m}${dd}.log`;
 }
@@ -71,7 +71,7 @@ async function readLastLogTails(n = LOG_SCAN_FILES, tailBytes = LOG_TAIL_BYTES) 
   return out;
 }
 
-// === FILE QUEUE ===
+// ===== FILE QUEUE =====
 // формат .json: { id, account, chat_id, reply_text, message_id, created_at }
 async function createTask({ account, chat_id, reply_text, message_id }) {
   if (!chat_id) throw new Error('chat_id required for task');
@@ -95,7 +95,7 @@ async function claimTask(account) {
   await ensureDir(TASK_DIR);
   let files = (await fsp.readdir(TASK_DIR)).filter(f => f.endsWith('.json'));
 
-  // сортировка: свежие вперёд
+  // новые вперёд
   files.sort((a, b) => {
     const ta = fs.statSync(path.join(TASK_DIR, a)).mtimeMs;
     const tb = fs.statSync(path.join(TASK_DIR, b)).mtimeMs;
@@ -108,7 +108,7 @@ async function claimTask(account) {
     files = files.filter(f => f.startsWith(pref));
   }
 
-  // берём только первые 3 (чтобы уменьшить гонки)
+  // берём только первые 3
   files = files.slice(0, 3);
 
   for (const f of files) {
@@ -120,11 +120,11 @@ async function claimTask(account) {
       const lockId = path.basename(taking);
       return { task: raw, lockId };
     } catch {
-      // забрали в параллельном процессе — пробуем следующий
+      // кто-то успел взять — пробуем дальше
     }
   }
 
-  // Подметание «висяков» этого аккаунта перед тем, как сказать has:false
+  // «подметание» висяков перед тем как вернуть пусто
   const locks = (await fsp.readdir(TASK_DIR)).filter(f => f.endsWith('.json.taking'));
   const now = Date.now();
   for (const lf of locks) {
@@ -159,14 +159,14 @@ async function readTaking(lockId) {
   return JSON.parse(await fsp.readFile(full, 'utf8'));
 }
 
-// === APP ===
+// ===== APP =====
 const app = express();
 app.use(express.json({ limit: '1mb' }));
 
 // health
 app.get('/', (req, res) => ok(res, { up: true }));
 
-// tasks debug: список файлов
+// debug: список файлов задач
 app.get('/tasks/debug', async (req, res) => {
   try {
     await ensureDir(TASK_DIR);
@@ -175,7 +175,7 @@ app.get('/tasks/debug', async (req, res) => {
   } catch (e) { res.status(500).send({ ok: false, error: String(e) }); }
 });
 
-// читать содержимое файла задачи
+// прочитать .json задачи
 app.get('/tasks/read', async (req, res) => {
   try {
     const file = String(req.query.file || '').trim();
@@ -197,18 +197,19 @@ app.post('/tasks/enqueue', async (req, res) => {
   } catch (e) { res.status(500).send({ ok: false, error: String(e) }); }
 });
 
-// === WEBHOOK ===
-// простая защита от дублей системного сообщения
+// ===== WEBHOOK =====
+
+// защита от дублей «первого системного»
 const seenSystemToday = new Set(); // ключ: `${account}:${chatId}`
 
 function looksLikeCandidateText(txt) {
-  return /кандидат|отклик|откликнулся/i.test(String(txt || ''));
+  return /кандидат.*откликнулся/i.test(String(txt || ''));
 }
 
 app.post('/webhook/:account', async (req, res) => {
   const account = req.params.account || 'hr-main';
 
-  // 1) логируем ВСЁ сразу — чтобы видеть, что реально прислал Avito
+  // 1) ЛОГИРУЕМ СРАЗУ — чтобы видеть, что реально пришло
   try {
     const headersDump = JSON.stringify(req.headers || {}, null, 2);
     const bodyDump    = JSON.stringify(req.body   || {}, null, 2);
@@ -220,32 +221,41 @@ app.post('/webhook/:account', async (req, res) => {
     );
   } catch {}
 
-  // 2) мягкая проверка секрета (если задан)
+  // 2) МЯГКАЯ проверка секрета / подписи
   if (WEBHOOK_SECRET) {
     const hSecret    = String(req.headers['x-avito-secret'] || req.body?.secret || '');
-    const hSignature = String(req.headers['x-avito-signature'] || ''); // Avito часто присылает подпись
+    const hSignature = String(
+      req.headers['x-avito-messenger-signature'] || // реальный заголовок Avito
+      req.headers['x-avito-signature'] || ''
+    );
     const pass =
-      (hSecret && hSecret === WEBHOOK_SECRET) ||
-      (hSignature && hSignature.length > 0); // временно считаем наличие подписи достаточным
+      (WEBHOOK_SECRET && hSecret === WEBHOOK_SECRET) || (!!hSignature);
     if (!pass) return bad(res, 403, 'forbidden');
   }
 
-  // 3) бизнес-логика
+  // 3) Постановка задач
   try {
     const payload  = req.body?.payload || {};
     const val      = payload?.value || {};
     const isSystem = val?.type === 'system';
     const txt      = String(val?.content?.text || '');
+    const flowId   = String(val?.content?.flow_id || '');
     const chatId   = val?.chat_id;
     const msgId    = val?.id;
 
-    if (isSystem && looksLikeCandidateText(txt) && chatId) {
+    const isJobFlow = isSystem && flowId === 'job';
+    const isCandidateText = looksLikeCandidateText(txt);
+
+    if (chatId && (isJobFlow || isCandidateText)) {
       let allowed = true;
-      if (ONLY_FIRST_SYSTEM) {
+
+      // На "flow_id:job" — ВСЕГДА ставим задачу (даже если это не первое system-сообщение)
+      if (!isJobFlow && ONLY_FIRST_SYSTEM) {
         const key = `${account}:${chatId}`;
         if (seenSystemToday.has(key)) allowed = false;
         else seenSystemToday.add(key);
       }
+
       if (allowed) {
         await createTask({
           account,
@@ -253,14 +263,15 @@ app.post('/webhook/:account', async (req, res) => {
           reply_text: DEFAULT_REPLY,
           message_id: msgId
         });
+        await appendLog(`[ENQUEUE] account=${account} chat=${chatId} reason=${isJobFlow ? 'flow:job' : 'text-match'}`);
       }
     }
-  } catch { /* игнор, вебхуку отвечаем 200 */ }
+  } catch { /* игнорим, вебхуку всегда отвечаем 200 */ }
 
   return ok(res);
 });
 
-// === LOGS ===
+// ===== LOGS =====
 app.get('/logs', async (req, res) => {
   try {
     await ensureDir(LOG_DIR);
@@ -299,7 +310,6 @@ app.get('/logs/has', async (req, res) => {
     if (author) {
       if (t.text.includes(`"author_id": ${author}`)) { exists = true; break; }
     } else {
-      // любое текстовое с author_id != 0 вблизи этого chat_id
       const re = new RegExp(`"chat_id"\\s*:\\s*"${chat}"[\\s\\S]{0,800}?"type"\\s*:\\s*"text"[\\s\\S]{0,400}?"author_id"\\s*:\\s*(\\d+)`, 'i');
       const m = re.exec(t.text);
       if (m && Number(m[1] || 0) > 0) { exists = true; break; }
@@ -308,7 +318,7 @@ app.get('/logs/has', async (req, res) => {
   return ok(res, { exists, files: tails.map(x => x.name) });
 });
 
-// === TASKS API ===
+// ===== TASKS API =====
 function checkKey(req, res) {
   const key = String(req.query.key || req.body?.key || '').trim();
   if (!TASK_KEY || key !== TASK_KEY) { bad(res, 403, 'bad key'); return false; }
@@ -347,7 +357,7 @@ app.post('/tasks/requeue', async (req, res) => {
   return ok(res);
 });
 
-// поддерживающий удар: "touch" mtime для лок-файла
+// Продлеваем «жизнь» лок-файла (для длинных операций)
 app.post('/tasks/heartbeat', async (req, res) => {
   if (!checkKey(req, res)) return;
   const lock = String(req.query.lock || req.body?.lock || '').trim();
@@ -363,7 +373,7 @@ app.post('/tasks/heartbeat', async (req, res) => {
   }
 });
 
-// doneSafe: закрыть только если в логах видно исходящее по этому chat_id
+// Закрыть только если в логах видно исходящее по этому chat_id
 app.post('/tasks/doneSafe', async (req, res) => {
   if (!checkKey(req, res)) return;
   const lock = String(req.query.lock || req.body?.lock || '').trim();
@@ -394,7 +404,7 @@ app.post('/tasks/doneSafe', async (req, res) => {
   return res.status(204).send(); // No Content
 });
 
-// === REAPER: периодически возвращаем протухшие локи ===
+// ===== REAPER: возвращаем протухшие локи =====
 setInterval(async () => {
   try {
     await ensureDir(TASK_DIR);
@@ -414,7 +424,7 @@ setInterval(async () => {
   } catch {}
 }, 30000);
 
-// === START ===
+// ===== START =====
 (async () => {
   await ensureDir(LOG_DIR);
   await ensureDir(TASK_DIR);
